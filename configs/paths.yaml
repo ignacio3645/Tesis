@@ -1,0 +1,12 @@
+data:
+
+  raw:
+    eeg: data/raw/eeg
+    tobii: data/raw/tobii/data_export.tsv
+
+  interim:
+    eeg: data/interim/eeg
+    tobii: data/interim/tobii
+
+  processed:
+    multimodal: data/processed/multimodal
