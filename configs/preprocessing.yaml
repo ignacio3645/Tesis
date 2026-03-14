@@ -1,0 +1,162 @@
+# =============================================================================
+# preprocessing.yaml — Proyecto Fondecyt 1231122
+# Ignacio Negrete Silva | Magíster en Ciencia de Datos, Universidad de Chile
+#
+# Todos los parámetros configurables del pipeline de preprocesamiento.
+# Ningún número debe aparecer hardcodeado en src/preprocessing/*.py.
+# Acceso en código: load_config("configs/preprocessing.yaml")["eeg"]
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# EEG — OpenBCI Cyton+Daisy, 125 Hz, 16 canales
+# Nota Roadmap v2: con Fs=125 Hz la resolución temporal es 8 ms/muestra.
+# Suficiente para delta/theta/alpha/beta. Features de gamma (30-40 Hz)
+# deben interpretarse con cautela — están en el límite de Nyquist (62.5 Hz).
+# -----------------------------------------------------------------------------
+eeg:
+
+  sfreq: 125.0  # Hz — confirmado empíricamente desde los archivos OpenBCI
+
+  # Mapeo OpenBCI → nombres estándar 10-20
+  # Basado en el protocolo de colocación de electrodos del Fondecyt 1231122
+  electrode_map:
+    " EXG Channel 0":  "Fp1"
+    " EXG Channel 1":  "Fp2"
+    " EXG Channel 2":  "C3"
+    " EXG Channel 3":  "C4"
+    " EXG Channel 4":  "T5"
+    " EXG Channel 5":  "T6"
+    " EXG Channel 6":  "O1"
+    " EXG Channel 7":  "O2"
+    " EXG Channel 8":  "F7"
+    " EXG Channel 9":  "F8"
+    " EXG Channel 10": "F3"
+    " EXG Channel 11": "F4"
+    " EXG Channel 12": "T3"
+    " EXG Channel 13": "T4"
+    " EXG Channel 14": "P3"
+    " EXG Channel 15": "P4"
+
+  # Filtrado — orden pipeline: CAR → Notch → Bandpass (ver clean_eeg.py)
+  # Ref: Bigdely-Shamlo et al. (2015), "The PREP pipeline", Front. Neuroinformatics
+  notch_freq:    50.0   # Hz — frecuencia de red eléctrica en Chile
+  bandpass_low:  1.0    # Hz — Roadmap v2 especifica 1 Hz (no 0.5) para Butterworth
+  bandpass_high: 40.0   # Hz — Roadmap v2 especifica 40 Hz (no 45) — límite gamma conservador
+
+  # Rechazo de artefactos por amplitud — previo a ICA
+  artifact_threshold_uv: 100.0  # µV — epochs con pico > umbral en > 50% de canales se rechazan
+
+  # ICA — Extended Infomax + ICLabel
+  # n_components como fracción de varianza explicada: MNE calcula automáticamente
+  # el número de componentes necesarios por participante (evita el warning de rango).
+  # Ref: Pion-Tonachini et al. (2019), NeuroImage
+  ica:
+    n_components: 0.999999  # float → selección automática basada en varianza explicada
+    method:       "infomax"
+    random_state: 42
+
+    # Umbrales de rechazo por categoría ICLabel.
+    # Menor umbral = rechazo más agresivo.
+    artifact_thresholds:
+      eye blink:       0.70
+      muscle artifact: 0.70
+      line noise:      0.70
+      other:           0.80
+
+  # Epoching — ventanas de segmentación alrededor del onset de cada estímulo
+  # Ref: Roadmap v2, Sección 2.2 — pipeline estándar coherente con DEAP [Koelstra et al., 2012]
+  epoching:
+    tmin:        -0.2  # segundos antes del onset del estímulo (baseline pre-estímulo)
+    tmax_offset:  0.5  # segundos añadidos DESPUÉS del offset del estímulo
+                       # ventana efectiva = [tmin, duracion_estimulo + tmax_offset]
+
+
+# -----------------------------------------------------------------------------
+# TOBII — Tobii Pro (GSR + Eye Tracking + Pupilometría en un mismo dispositivo)
+#
+# Nota arquitectura crítica (Roadmap v2, Sección 2.1):
+# GSR y eye tracking/pupila fueron capturados por el MISMO dispositivo Tobii Pro,
+# por lo que comparten reloj hardware. NO requieren sincronización entre sí.
+# La única sincronización no trivial es EEG ↔ Tobii Pro (relojes independientes).
+# -----------------------------------------------------------------------------
+tobii:
+
+  # Formato de fecha de Recording date — determinado empiricamente:
+  # al menos un participante tiene fecha con segundo componente > 12 (ej. 08/19/2025),
+  # lo que prueba mm/dd/yyyy para toda la cohorte dado que todas las grabaciones
+  # se realizaron en el mismo lugar y con la misma metodologia.
+  date_format: "%m/%d/%Y %H:%M:%S.%f"
+
+  # Frecuencia de muestreo nominal del Tobii Pro
+  # Nota: el análisis de los datos muestra mediana ~65.89 Hz y media ~82.58 Hz
+  # debido a gaps en el stream. El resampleo a sfreq_target produce una señal uniforme.
+  sfreq_nominal:  60.0   # Hz — frecuencia nominal del dispositivo
+  sfreq_target:   60.0   # Hz — frecuencia objetivo post-resampleo (señal uniforme)
+
+  # Interpolación de gaps en el stream Tobii
+  # Gaps menores al umbral se interpolan linealmente; mayores se dejan como NaN
+  gap_interpolation_max_ms: 200.0  # ms — umbral máximo para interpolación de gaps
+
+  # ---- Pupilometría ----
+  # Detección de parpadeos: caída abrupta del diámetro pupilar
+  # Ref: Roadmap v2, Sección 2.2; Laeng et al. (2012)
+  pupil:
+    blink_detection_threshold_pct: 30.0   # % — caída > 30% en < blink_max_duration_ms → parpadeo
+    blink_max_duration_ms:         100.0  # ms — ventana máxima para considerar caída como parpadeo
+    interpolation_method:          "cubic" # método de interpolación en ventana de parpadeo
+
+  # ---- GSR / EDA ----
+  # Descomposición tónico/fásico vía cvxEDA o neurokit2
+  # Ref: Benedek & Kaernbach (2010); Boucsein (2012)
+  gsr:
+    decomposition_method: "cvxeda"  # opciones: "cvxeda" | "neurokit"
+    # Normalización z-score dentro de sesión por sujeto para controlar
+    # diferencias inter-individuo en conductividad basal
+    normalize_per_subject: true
+
+    # Segmentación por evento: ventana post-onset para capturar latencia típica de SCR
+    # Ref: Boucsein (2012) — latencia SCR 1-5 s post-estímulo
+    epoch_window_sec: 4.0  # segundos post-onset del estímulo
+
+  # ---- Eye Tracking ----
+  # Algoritmo de detección de fijaciones y sacadas
+  # Ref: Salvucci & Goldberg (2000) — I-VT estándar para eye tracking en UX
+  eyetracking:
+    fixation_algorithm: "IVT"   # I-VT (velocity-threshold) — estándar para estímulos estáticos
+    ivt_velocity_threshold: 30  # grados/segundo — umbral de velocidad angular para sacadas
+
+
+# -----------------------------------------------------------------------------
+# Sincronización EEG ↔ Tobii Pro
+#
+# Única sincronización no trivial del pipeline. Relojes independientes;
+# los marcadores de evento de software son el único punto de anclaje.
+# Ref: Roadmap v2, Sección 2.3
+# -----------------------------------------------------------------------------
+synchronization:
+
+  # Columna de eventos en el archivo Tobii que marca el onset de cada estímulo
+  anchor_event: "ImageStimulusStart"
+
+  # Corrección de drift entre relojes
+  drift_threshold_ms: 50.0   # ms — drift < umbral: corrección por interpolación lineal
+                               #      drift > umbral: corrección por regresión lineal entre relojes
+                               # Ref: Roadmap v2, Sección 2.3
+
+  # Validación post-sincronización
+  # Verificar que N200 (~200 ms) y P300 (~300 ms) aparecen en el intervalo esperado
+  # para 5 sujetos aleatorios como sanity check del drift corregido
+  validation_n_subjects: 5    # número de sujetos aleatorios para validación visual
+  erp_n200_window: [0.150, 0.250]  # segundos post-onset — ventana esperada N200
+  erp_p300_window: [0.250, 0.450]  # segundos post-onset — ventana esperada P300
+
+
+# -----------------------------------------------------------------------------
+# Calidad de datos — criterios de exclusión de participantes
+# Ref: Roadmap v2, Sección 2.1
+# -----------------------------------------------------------------------------
+quality:
+
+  # Un participante se excluye si la pérdida de señal en cualquier modalidad
+  # supera este umbral. Se aplica en la etapa de ingesta.
+  max_signal_loss_pct: 20.0  # % — umbral de exclusión por pérdida de señal
