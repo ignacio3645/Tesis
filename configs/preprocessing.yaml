@@ -40,8 +40,8 @@ eeg:
   # Filtrado — orden pipeline: CAR → Notch → Bandpass (ver clean_eeg.py)
   # Ref: Bigdely-Shamlo et al. (2015), "The PREP pipeline", Front. Neuroinformatics
   notch_freq:    50.0   # Hz — frecuencia de red eléctrica en Chile
-  bandpass_low:  1.0    # Hz — Roadmap v2 especifica 1 Hz (no 0.5) para Butterworth
-  bandpass_high: 40.0   # Hz — Roadmap v2 especifica 40 Hz (no 45) — límite gamma conservador
+  bandpass_low:  1.0    # Hz — requerido por ICLabel; preserva delta desde 1 Hz
+  bandpass_high: 40.0   # Hz — elimina EMG; por encima del límite gamma de la tabla de features
 
   # Rechazo de artefactos por amplitud — previo a ICA
   artifact_threshold_uv: 100.0  # µV — epochs con pico > umbral en > 50% de canales se rechazan
@@ -81,74 +81,149 @@ eeg:
 # -----------------------------------------------------------------------------
 tobii:
 
-  # Formato de fecha de Recording date — determinado empiricamente:
-  # al menos un participante tiene fecha con segundo componente > 12 (ej. 08/19/2025),
-  # lo que prueba mm/dd/yyyy para toda la cohorte dado que todas las grabaciones
-  # se realizaron en el mismo lugar y con la misma metodologia.
+  # --------------------------------------------------------------------------
+  # Nombres de columnas del archivo Tobii Pro (Data_export.tsv)
+  # Declarados aquí para que clean_tobii.py no tenga strings hardcodeados.
+  # Confirmados empíricamente sobre los datos del Fondecyt 1231122.
+  # --------------------------------------------------------------------------
+  columns:
+    # Timestamps
+    recording_timestamp:  "Recording timestamp"   # µs desde inicio grabación (int64, parte desde 0)
+    recording_date:       "Recording date"         # fecha de grabación — formato mm/dd/yyyy
+    recording_start_time: "Recording start time"   # hora exacta de inicio — HH:MM:SS.ffffff
+    eyetracker_timestamp: "Eyetracker timestamp"   # timestamp interno del eye tracker (float)
+
+    # Eventos
+    event:       "Event"        # tipo de evento (ImageStimulusStart, GSREvent, etc.)
+    event_value: "Event value"  # valor asociado al evento (nombre del estímulo)
+
+    # Gaze
+    gaze_x: "Gaze point X"   # coordenada X del punto de mirada (px)
+    gaze_y: "Gaze point Y"   # coordenada Y del punto de mirada (px)
+
+    # Movimiento ocular
+    eye_movement_type:       "Eye movement type"        # Fixation | Saccade | EyesNotFound | Unclassified
+    eye_movement_type_index: "Eye movement type index"  # índice secuencial del evento ocular
+    gaze_event_duration:     "Gaze event duration"      # duración del evento actual (ms)
+    fixation_point_x:        "Fixation point X"         # coordenada X del centroide de fijación (px)
+    fixation_point_y:        "Fixation point Y"         # coordenada Y del centroide de fijación (px)
+
+    # Pupilometría — se usa filtered como señal principal
+    pupil_left:     "Pupil diameter left"      # diámetro pupila izquierda (mm)
+    pupil_right:    "Pupil diameter right"     # diámetro pupila derecha (mm)
+    pupil_filtered: "Pupil diameter filtered"  # diámetro pupilar filtrado por Tobii (mm) — columna principal
+
+    # GSR
+    gsr: "Galvanic skin response (GSR)"  # conductancia galvánica (µS) — ~18% densidad de muestras
+
+    # Metadatos del estímulo presentado
+    presented_stimulus_name: "Presented Stimulus name"  # nombre del estímulo activo en cada muestra
+
+  # --------------------------------------------------------------------------
+  # Reconstrucción de timestamps
+  # --------------------------------------------------------------------------
+  # Formato de fecha determinado empíricamente: al menos un participante tiene
+  # fecha con segundo componente > 12 (ej. 08/19/2025), lo que prueba mm/dd/yyyy
+  # para toda la cohorte (misma metodología y equipamiento de grabación).
   date_format: "%m/%d/%Y %H:%M:%S.%f"
 
-  # Frecuencia de muestreo nominal del Tobii Pro
-  # Nota: el análisis de los datos muestra mediana ~65.89 Hz y media ~82.58 Hz
-  # debido a gaps en el stream. El resampleo a sfreq_target produce una señal uniforme.
-  sfreq_nominal:  60.0   # Hz — frecuencia nominal del dispositivo
-  sfreq_target:   60.0   # Hz — frecuencia objetivo post-resampleo (señal uniforme)
+  # --------------------------------------------------------------------------
+  # Frecuencia de muestreo
+  # --------------------------------------------------------------------------
+  # El stream Tobii es irregular: mediana ~65-68 Hz, media ~82-83 Hz.
+  # El resampleo a sfreq_target produce una grilla temporal uniforme.
+  sfreq_nominal:  60.0  # Hz — frecuencia nominal del dispositivo
+  sfreq_target:   60.0  # Hz — frecuencia objetivo post-resampleo
 
-  # Interpolación de gaps en el stream Tobii
-  # Gaps menores al umbral se interpolan linealmente; mayores se dejan como NaN
-  gap_interpolation_max_ms: 200.0  # ms — umbral máximo para interpolación de gaps
+  # Interpolación de gaps en el stream
+  # Gaps < umbral: interpolación lineal. Gaps >= umbral: NaN (no interpolar).
+  # Empíricamente: 1 gap > 200 ms por sesión — prácticamente despreciable.
+  gap_interpolation_max_ms: 200.0  # ms
 
-  # ---- Pupilometría ----
-  # Detección de parpadeos: caída abrupta del diámetro pupilar
-  # Ref: Roadmap v2, Sección 2.2; Laeng et al. (2012)
+  # --------------------------------------------------------------------------
+  # Pupilometría
+  # Ref: Laeng et al. (2012); Beatty (1982)
+  # --------------------------------------------------------------------------
   pupil:
-    blink_detection_threshold_pct: 30.0   # % — caída > 30% en < blink_max_duration_ms → parpadeo
-    blink_max_duration_ms:         100.0  # ms — ventana máxima para considerar caída como parpadeo
-    interpolation_method:          "cubic" # método de interpolación en ventana de parpadeo
+    # Señal de entrada preferida — usar filtered si existe, izquierda como fallback
+    preferred_column: "filtered"  # opciones: "filtered" | "left" | "right"
 
-  # ---- GSR / EDA ----
-  # Descomposición tónico/fásico vía cvxEDA o neurokit2
-  # Ref: Benedek & Kaernbach (2010); Boucsein (2012)
-  gsr:
-    decomposition_method: "cvxeda"  # opciones: "cvxeda" | "neurokit"
-    # Normalización z-score dentro de sesión por sujeto para controlar
-    # diferencias inter-individuo en conductividad basal
+    # Detección de parpadeos por caída abrupta del diámetro pupilar
+    # Validado empíricamente: marca 0.04-0.23% de muestras (razonable)
+    blink_detection_threshold_pct: 30.0   # % — caída > umbral en ventana → parpadeo
+    blink_max_duration_ms:        100.0   # ms — duración máxima de un parpadeo válido
+    interpolation_method:         "cubic" # método de interpolación en ventana de parpadeo
+
+    # Normalización z-score por sujeto — controla baseline inter-individuo
     normalize_per_subject: true
 
-    # Segmentación por evento: ventana post-onset para capturar latencia típica de SCR
-    # Ref: Boucsein (2012) — latencia SCR 1-5 s post-estímulo
-    epoch_window_sec: 4.0  # segundos post-onset del estímulo
+  # --------------------------------------------------------------------------
+  # GSR / EDA
+  # Ref: Benedek & Kaernbach (2010); Boucsein (2012); Greco et al. (2016)
+  # --------------------------------------------------------------------------
+  gsr:
+    # Descomposición tónico (SCL) / fásico (SCR)
+    # cvxeda: más preciso, requiere cvxpy. neurokit: más rápido, sin dependencias extra.
+    decomposition_method: "cvxeda"  # opciones: "cvxeda" | "neurokit"
 
-  # ---- Eye Tracking ----
-  # Algoritmo de detección de fijaciones y sacadas
-  # Ref: Salvucci & Goldberg (2000) — I-VT estándar para eye tracking en UX
+    # Detección de artefactos por salto abrupto (desconexión del sensor)
+    # Umbral: mean + n_sigma * std de la derivada absoluta
+    # Empíricamente: umbral resultante ~0.005-0.009 µS; detecta 58-79 artefactos por sesión
+    artifact_sigma_threshold: 5.0  # n_sigma para el umbral de detección de artefactos
+
+    # Normalización z-score por sujeto — controla conductividad basal inter-individuo
+    normalize_per_subject: true
+
+  # --------------------------------------------------------------------------
+  # Eye Tracking
+  # Ref: Salvucci & Goldberg (2000); Rayner (1998)
+  # --------------------------------------------------------------------------
   eyetracking:
-    fixation_algorithm: "IVT"   # I-VT (velocity-threshold) — estándar para estímulos estáticos
-    ivt_velocity_threshold: 30  # grados/segundo — umbral de velocidad angular para sacadas
+    # Algoritmo de clasificación de movimientos oculares
+    # IVT: velocity-threshold — estándar para estímulos estáticos web
+    # Nota: el Tobii Pro ya entrega la clasificación en Eye movement type.
+    # Este parámetro documenta el algoritmo usado por el dispositivo, no
+    # implica recalcular la clasificación en el pipeline.
+    fixation_algorithm:     "IVT"  # I-VT (velocity-threshold)
+    ivt_velocity_threshold: 30     # grados/segundo — umbral de velocidad angular
+
+    # Tipos de movimiento ocular válidos en los datos
+    # Confirmados empíricamente: ['Fixation', 'Saccade', 'EyesNotFound', 'Unclassified']
+    valid_movement_types:
+      - "Fixation"
+      - "Saccade"
+      - "EyesNotFound"
+      - "Unclassified"
+
+    # Filtros de calidad para fijaciones
+    # Fijaciones < min_fixation_ms se consideran inestabilidades del tracker, no fijaciones reales
+    # Ref: Salvucci & Goldberg (2000) — umbral típico 100 ms
+    min_fixation_ms: 100.0   # ms — duración mínima para considerar una fijación válida
 
 
 # -----------------------------------------------------------------------------
 # Sincronización EEG ↔ Tobii Pro
-#
 # Única sincronización no trivial del pipeline. Relojes independientes;
 # los marcadores de evento de software son el único punto de anclaje.
 # Ref: Roadmap v2, Sección 2.3
 # -----------------------------------------------------------------------------
 synchronization:
 
-  # Columna de eventos en el archivo Tobii que marca el onset de cada estímulo
+  # Evento ancla para alineación temporal
   anchor_event: "ImageStimulusStart"
 
-  # Corrección de drift entre relojes
-  drift_threshold_ms: 50.0   # ms — drift < umbral: corrección por interpolación lineal
-                               #      drift > umbral: corrección por regresión lineal entre relojes
-                               # Ref: Roadmap v2, Sección 2.3
+  # Umbral para elegir método de corrección de drift acumulado entre relojes.
+  # Nota: el offset inicial EEG-Tobii (~19-47 s según participante) NO es drift —
+  # es el tiempo de arranque diferido del operador. Se corrige alineando por anchor_event.
+  # El drift es la desviación creciente DENTRO de la sesión, estimada en synchronize.py
+  # comparando el intervalo entre primer y último anchor_event en ambos sistemas.
+  drift_threshold_ms: 50.0   # ms — drift < umbral → interpolación lineal
+                               #      drift >= umbral → regresión lineal entre relojes
 
-  # Validación post-sincronización
-  # Verificar que N200 (~200 ms) y P300 (~300 ms) aparecen en el intervalo esperado
-  # para 5 sujetos aleatorios como sanity check del drift corregido
-  validation_n_subjects: 5    # número de sujetos aleatorios para validación visual
-  erp_n200_window: [0.150, 0.250]  # segundos post-onset — ventana esperada N200
-  erp_p300_window: [0.250, 0.450]  # segundos post-onset — ventana esperada P300
+  # Validación post-sincronización: verificar ERP esperados
+  validation_n_subjects: 5
+  erp_n200_window: [0.150, 0.250]  # s post-onset
+  erp_p300_window: [0.250, 0.450]  # s post-onset
 
 
 # -----------------------------------------------------------------------------
@@ -156,7 +231,4 @@ synchronization:
 # Ref: Roadmap v2, Sección 2.1
 # -----------------------------------------------------------------------------
 quality:
-
-  # Un participante se excluye si la pérdida de señal en cualquier modalidad
-  # supera este umbral. Se aplica en la etapa de ingesta.
-  max_signal_loss_pct: 20.0  # % — umbral de exclusión por pérdida de señal
+  max_signal_loss_pct: 20.0  # % — exclusión si pérdida > umbral en cualquier modalidad
