@@ -1,3 +1,49 @@
-pandas
-pyarrow
-pyyaml
+# ============================================================
+# requirements.txt — Tesis Ignacio Negrete Silva
+# Predicciones Afectivo-Atencionales con Redes Neuronales
+# y Señales Neurofisiológicas para Guiar el Rediseño de
+# Interfaces Web — Fondecyt 1231122, U. Chile, 2026
+# ============================================================
+# Entorno validado: Python 3.11, conda env 'defecto'
+# Plataforma: Windows 11 (desarrollo) / Linux (producción)
+# ============================================================
+
+# ── Núcleo científico ────────────────────────────────────────
+numpy>=1.26.0
+pandas>=2.1.0
+scipy>=1.11.0
+
+# ── EEG — preprocesado e ICA ─────────────────────────────────
+mne>=1.6.0
+mne-icalabel>=0.6.0          # clasificación automática de componentes ICA
+
+# ── Señales fisiológicas (GSR, pupila) ───────────────────────
+neurokit2>=0.2.7              # descomposición SCL/SCR, limpieza GSR y pupila
+# cvxeda>=1.0.0               # descomposición SCL/SCR alternativa (opcional)
+                              # instalar con: pip install cvxeda
+                              # si no está disponible, neurokit2 actúa como fallback
+
+# ── Serialización y lectura de datos ─────────────────────────
+pyarrow>=14.0.0               # lectura/escritura de .parquet
+fastparquet>=2023.10.0        # backend alternativo para parquet
+
+# ── Configuración ────────────────────────────────────────────
+pyyaml>=6.0.1                 # carga de configs/paths.yaml y preprocessing.yaml
+
+# ── Visualización ────────────────────────────────────────────
+matplotlib>=3.8.0
+seaborn>=0.13.0
+
+# ── Notebooks ────────────────────────────────────────────────
+jupyter>=1.0.0
+ipykernel>=6.28.0
+ipywidgets>=8.1.0             # display() en notebooks
+
+# ── Deep Learning (etapas futuras: feature engineering + modelos) ──
+# torch>=2.2.0               # PyTorch — activar cuando se llegue a modelos
+# torchvision>=0.17.0
+# torchaudio>=2.2.0
+
+# ── Utilidades ───────────────────────────────────────────────
+tqdm>=4.66.0                  # barras de progreso en procesamiento batch
+pathlib2>=2.3.7               # compatibilidad pathlib (Python < 3.10)
