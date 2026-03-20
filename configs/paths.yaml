@@ -1,12 +1,77 @@
+# =============================================================================
+# paths.yaml — Proyecto Fondecyt 1231122
+# Ignacio Negrete Silva | Magíster en Ciencia de Datos, Universidad de Chile
+#
+# Convención de rutas: todas relativas a la raíz del proyecto.
+# Acceso en código: load_config("configs/paths.yaml")["data"]["raw"]["eeg"]
+# =============================================================================
+
 data:
 
   raw:
-    eeg: data/raw/eeg
-    tobii: data/raw/tobii/data_export.tsv
+    eeg:   data/raw/eeg                      # Archivos .txt OpenBCI, uno por sesión
+    tobii: data/raw/tobii/data_export.tsv    # Archivo único Tobii Pro (todos los participantes)
 
   interim:
-    eeg: data/interim/eeg
-    tobii: data/interim/tobii
+    eeg:   data/interim/eeg                  # Parquet por participante — post-ingesta, pre-limpieza
+    tobii: data/interim/tobii                # Parquet por participante — post-split, pre-limpieza
 
   processed:
-    multimodal: data/processed/multimodal
+    eeg:        data/processed/eeg           # EEG limpio (CAR + filtros + ICA)
+    tobii:      data/processed/tobii         # Tobii limpio (blinks interpolados, GSR descompuesto)
+    multimodal: data/processed/multimodal    # Epochs sincronizados EEG + Tobii, listos para FE
+
+  # ---------------------------------------------------------------------------
+  # Feature Engineering — doble output obligatorio (Roadmap v2, Sección 2.4)
+  #
+  # Output A — Feature vectors tabulares por modalidad separada.
+  #   Separados por modalidad para que la regla anti-circularidad sea
+  #   implementable sin reprocesar datos:
+  #     Tarea Atención → features: eeg + gsr         (NUNCA pupil/eyetracking)
+  #     Tarea Valencia → features: gsr + pupil + et  (NUNCA eeg)
+  #
+  # Output B — Tensores temporales por modalidad.
+  #   Obligatorio guardarlos en esta etapa. Si no se persisten aquí,
+  #   habría que reprocesar todo el dataset al llegar al Bloque Opcional
+  #   (auto-supervisado: CMC, BYOL, VICReg, MAE).
+  # ---------------------------------------------------------------------------
+  features:
+
+    tabular:
+      eeg:         data/features/tabular/eeg          # Band power, FAA, DE, Hjorth — (n_epochs, n_eeg_features)
+      gsr:         data/features/tabular/gsr          # SCL, SCR count/amp/latency, AUC — (n_epochs, n_gsr_features)
+      pupil:       data/features/tabular/pupil        # Delta pupil, mean, variance — (n_epochs, n_pupil_features)
+      eyetracking: data/features/tabular/eyetracking  # Fixation dur/count, saccade amp/dur — (n_epochs, n_et_features)
+
+    temporal:
+      eeg:   data/features/temporal/eeg    # Tensor (n_epochs, T_eeg, 10)  — z-score por canal por epoch
+      gsr:   data/features/temporal/gsr    # Tensor (n_epochs, T_gsr, 1)   — SCR normalizado
+      pupil: data/features/temporal/pupil  # Tensor (n_epochs, T_pupil, 1) — diámetro normalizado e interpolado
+
+
+# =============================================================================
+# Reports — figuras, tablas y QC generados en cada etapa del pipeline.
+# Estructura espeja src/ para trazabilidad entre código y contenido de tesis.
+# =============================================================================
+
+reports:
+
+  ingestion:
+    figures: reports/ingestion/figures
+    qc:      reports/ingestion/qc       # completitud por participante y modalidad (CSV)
+
+  preprocessing:
+    figures: reports/preprocessing/figures  # PSD before/after, ICLabel bar charts
+    qc:      reports/preprocessing/qc       # ica_summary.csv, iclabel_{participant}.csv
+
+  synchronization:
+    figures: reports/synchronization/figures  # timestamp overlap, drift estimado
+    qc:      reports/synchronization/qc       # sync_offsets.csv, marcadores faltantes
+
+  features:
+    figures: reports/features/figures  # distribuciones, correlaciones inter-modalidad
+    tables:  reports/features/tables   # feature_statistics.csv, separabilidad de clases
+
+  models:
+    figures: reports/models/figures  # confusion matrices, ROC curves, UMAP de embeddings
+    tables:  reports/models/tables   # results_summary.csv, subgroup_analysis.csv

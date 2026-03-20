@@ -374,20 +374,58 @@ This allows experiment parameters to be controlled without modifying code.
 
 # Reports
 
-Generated figures and results used in the thesis.
+Generated figures, tables, and quality control outputs produced at each stage
+of the pipeline. Organized by pipeline stage to ensure traceability between
+code and thesis content.
 
 ```
 reports/
 
-    figures/
-    tables/
+    ingestion/
+    preprocessing/
+    synchronization/
+    features/
+    models/
 ```
 
-Examples:
+Each subdirectory mirrors a stage in `src/` and may contain:
 
-* signal plots
-* model evaluation charts
-* experiment comparisons
+* `figures/`  — plots (.png, .pdf) ready for the thesis
+* `tables/`   — CSV or LaTeX exports of summary statistics
+* `qc/`       — quality control outputs (e.g. ICA reports, artifact counts)
+
+Example contents per stage:
+
+```
+reports/
+
+    preprocessing/
+        figures/
+            psd_before_after_participant01.png
+            ica_components_participant01.png
+        qc/
+            ica_summary.csv
+
+    synchronization/
+        figures/
+            timestamp_overlap_participant01.png
+        qc/
+            sync_offsets.csv
+
+    features/
+        figures/
+            band_power_distributions.png
+            pupil_dilation_by_stimulus.png
+        tables/
+            feature_statistics.csv
+
+    models/
+        figures/
+            confusion_matrix_multimodal.png
+            roc_curves.png
+        tables/
+            results_summary.csv
+```
 
 ---
 
