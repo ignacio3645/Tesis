@@ -16,9 +16,14 @@ Solution (validated on P1):
     1. Compute initial offset   : tobii_start − eeg_start  (constant per session)
     2. Estimate drift           : compare session duration measured by each clock
                                   using ImageStimulusStart events as shared anchor
-    3. Apply linear correction  : project EEG timestamps into Tobii time-space
-                                  via  t_corrected = tobii_start
-                                                   + (t_from_eeg_start × drift_scale)
+    3. Apply linear correction  : project EEG timestamps into drift-corrected
+                                  absolute time via
+                                  t_corrected = eeg_start
+                                              + (t_from_eeg_start × drift_scale)
+                                  Both systems share the OS wall-clock datetime64
+                                  domain — only the drift is corrected, not the
+                                  offset (which is already encoded in the absolute
+                                  timestamps and must NOT be removed).
     4. Classify stimuli         : assign epoch_type to each ImageStimulusStart based
                                   on stimulus name prefix and temporal position
     5. Extract epochs           : slice EEG and Tobii signals for each stimulus window
@@ -217,12 +222,13 @@ def compute_sync_params(
     last_anchor_tobii  = anchor_ts[-1]
     duration_tobii = (last_anchor_tobii - first_anchor_tobii).total_seconds()
 
-    # Project anchor timestamps into EEG time-space (subtract offset)
-    first_anchor_eeg_equiv = first_anchor_tobii - pd.Timedelta(seconds=offset_s)
-    last_anchor_eeg_equiv  = last_anchor_tobii  - pd.Timedelta(seconds=offset_s)
-
-    idx_first = (eeg["timestamp"] - first_anchor_eeg_equiv).abs().idxmin()
-    idx_last  = (eeg["timestamp"] - last_anchor_eeg_equiv).abs().idxmin()
+    # Anchor lookup: both EEG and Tobii timestamps are absolute wall-clock
+    # datetime64 — they share the same OS time reference.  Anchors can therefore
+    # be located in EEG space by direct proximity search without any offset
+    # arithmetic.  Subtracting offset_s here would be a double-compensation
+    # because the offset is already encoded in the absolute timestamps themselves.
+    idx_first = (eeg["timestamp"] - first_anchor_tobii).abs().idxmin()
+    idx_last  = (eeg["timestamp"] - last_anchor_tobii).abs().idxmin()
     duration_eeg = (
         eeg["timestamp"].iloc[idx_last] - eeg["timestamp"].iloc[idx_first]
     ).total_seconds()
@@ -270,14 +276,21 @@ def apply_eeg_correction(
     sync_params: dict,
 ) -> pd.DataFrame:
     """
-    Project EEG timestamps into Tobii time-space.
+    Project EEG timestamps into a drift-corrected absolute time axis.
 
     Correction:
-        t_corrected = tobii_start + (seconds_from_eeg_start × drift_scale)
+        t_corrected = eeg_start + (seconds_from_eeg_start × drift_scale)
 
-    This simultaneously:
-        (a) removes the initial offset (EEG → Tobii time origin)
-        (b) applies a linear drift scale so the two clocks agree on duration
+    This applies ONLY the linear drift scale, leaving the absolute wall-clock
+    origin intact.  Because both EEG and Tobii timestamps are already expressed
+    in the same OS wall-clock datetime64 domain, no re-basing to tobii_start is
+    needed.  Using tobii_start as the intercept would push the entire EEG signal
+    ~47 s into the future, destroying the stimulus-response alignment.
+
+    The drift_scale (≈ 1.000004) corrects exclusively for the frequency
+    discrepancy between the two quartz oscillators, ensuring that the corrected
+    EEG duration matches the Tobii duration between the first and last anchor
+    events.
 
     Parameters
     ----------
@@ -289,14 +302,16 @@ def apply_eeg_correction(
     eeg copy with added column 'timestamp_corrected' (datetime64[ns])
     Shape unchanged: (N_eeg_samples, n_channels + 2)
     """
-    tobii_start  = sync_params["tobii_start"]
-    drift_scale  = sync_params["drift_scale"]
-    eeg_start    = sync_params["eeg_start"]
+    drift_scale = sync_params["drift_scale"]
+    eeg_start   = sync_params["eeg_start"]
 
     eeg_out = eeg.copy()
     seconds_from_start = (eeg_out["timestamp"] - eeg_start).dt.total_seconds()
+
+    # Anchor the corrected timeline to eeg_start (absolute wall-clock) and apply
+    # only the drift scale — preserving the OS ground truth without double-offset.
     eeg_out["timestamp_corrected"] = (
-        tobii_start
+        eeg_start
         + pd.to_timedelta(seconds_from_start * drift_scale, unit="s")
     )
     logger.info(

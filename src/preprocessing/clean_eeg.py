@@ -6,15 +6,19 @@ EEG preprocessing pipeline for OpenBCI 16-channel recordings.
 Pipeline order (methodologically justified):
     1. Channel renaming (OpenBCI → 10-20 standard)
     2. Unit conversion (raw counts → µV → V for MNE)
-    3. Common Average Reference (CAR)
-    4. Notch filter (50 Hz line noise)
-    5. Bandpass filter (0.5–45 Hz)
+    3. Notch filter (50 Hz line noise)          ← spectral cleaning first
+    4. Bandpass filter (1–40 Hz)
+    5. Common Average Reference (CAR)           ← AFTER spectral cleaning
     6. ICA artifact rejection (Extended Infomax + ICLabel)
     7. Timestamp reconstruction and DataFrame export
 
 Note on filter order:
-    CAR is applied BEFORE ICA as required by ICLabel's design assumptions.
-    Notch is applied BEFORE bandpass to avoid filter interaction artifacts.
+    Notch and Bandpass are applied BEFORE CAR to prevent local 50 Hz artifacts
+    from contaminating the virtual average reference and propagating to all 15
+    remaining channels before the notch can suppress them locally.
+    CAR is then applied post-filtering so that ICLabel's topographic maps are
+    computed on a spectrally clean, average-referenced signal, as required by
+    its design (Bigdely-Shamlo et al., 2015).
     Reference: Bigdely-Shamlo et al. (2015), "The PREP pipeline", Front. Neuroinformatics.
 
 Computational complexity:
@@ -137,10 +141,18 @@ def apply_preprocessing(
     """
     Apply the full preprocessing pipeline to an MNE Raw object.
 
-    Pipeline order:
-        1. Common Average Reference (CAR)
-        2. Notch filter
-        3. Bandpass filter
+    Pipeline order (SOTA — Bigdely-Shamlo et al., 2015):
+        1. Notch filter  (50 Hz)      — suppress line noise locally per-channel
+        2. Bandpass filter (1–40 Hz)  — remove DC drift and high-freq noise
+        3. Common Average Reference (CAR) — spatial filter on the clean spectrum
+
+    Rationale for this order:
+        If CAR were applied first, any channel with residual 50 Hz contamination
+        would inject that artifact into the virtual average reference and propagate
+        it to all 15 remaining channels before the Notch can suppress it locally.
+        Filtering first ensures the CAR averages a spectrally clean signal, and
+        ICLabel receives topographic maps free of spectral contamination, as
+        required by its design assumptions.
 
     Parameters
     ----------
@@ -158,12 +170,12 @@ def apply_preprocessing(
     bp_low: float = cfg["bandpass_low"]
     bp_high: float = cfg["bandpass_high"]
 
-    logger.info("  Applying Common Average Reference (CAR)...")
-    raw_proc = raw.copy().set_eeg_reference("average", projection=False, verbose=False)
-
+    # Step 1 — Notch: suppress 50 Hz line noise locally in sensor space
     logger.info(f"  Applying Notch filter at {notch_freq} Hz...")
+    raw_proc = raw.copy()
     raw_proc.notch_filter(freqs=notch_freq, method="fir", phase="zero", verbose=False)
 
+    # Step 2 — Bandpass: remove sub-Hz drift and high-freq muscle noise
     logger.info(f"  Applying bandpass filter [{bp_low}-{bp_high} Hz]...")
     raw_proc.filter(
         l_freq=bp_low,
@@ -172,6 +184,10 @@ def apply_preprocessing(
         phase="zero",
         verbose=False,
     )
+
+    # Step 3 — CAR: applied on spectrally clean signal as required by ICLabel
+    logger.info("  Applying Common Average Reference (CAR)...")
+    raw_proc.set_eeg_reference("average", projection=False, verbose=False)
 
     return raw_proc
 

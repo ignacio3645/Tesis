@@ -232,9 +232,3 @@ synchronization:
 # -----------------------------------------------------------------------------
 quality:
   max_signal_loss_pct: 20.0  # % — exclusión si pérdida > umbral en cualquier modalidad
-
-synchronization:
-  anchor_event: ImageStimulusStart
-  drift_threshold_ms: 50.0
-  erp_n200_window: [0.150, 0.250]
-  erp_p300_window: [0.250, 0.500]

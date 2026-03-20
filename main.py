@@ -21,7 +21,7 @@ Usage
 
 Pipeline stages
 ---------------
-    preprocessing_eeg   : CAR → Notch → Bandpass → ICA (clean_eeg.py)
+    preprocessing_eeg   : Notch → Bandpass → CAR → ICA (clean_eeg.py)
     preprocessing_tobii : Timestamps → Resample → GSR → Pupil → ET (clean_tobii.py)
     synchronization     : Offset + drift correction → epoch extraction (synchronize.py)
     preprocessing       : Runs all three stages above in order
@@ -58,26 +58,37 @@ logger = logging.getLogger("main")
 def run_preprocessing_eeg(participant: str | None, save: bool) -> None:
     """
     Stage 1: EEG preprocessing.
-    CAR → Notch 50 Hz → Bandpass 1-40 Hz → Extended Infomax ICA + ICLabel.
+    Notch 50 Hz → Bandpass 1-40 Hz → CAR → Extended Infomax ICA + ICLabel.
 
     Input  : data/interim/eeg/   (one .parquet per participant)
     Output : data/processed/eeg/ (one .parquet per participant, 16 ch + timestamp)
-    Reports: reports/preprocessing/qc/ica_summary.csv
-    """
-    from src.preprocessing.clean_eeg import (
-        preprocess_participant,
-        preprocess_all,
-        build_ica_summary,
-    )
+    Reports: reports/preprocessing/figures/ — PSD and ICLabel plots per participant
+             reports/preprocessing/qc/      — iclabel_{pid}.csv + ica_summary.csv
 
-    paths  = load_config("configs/paths.yaml")
-    cfg    = load_config("configs/preprocessing.yaml")
+    Bugs fixed vs original:
+        [B1] report_dirs was never built or passed to preprocess_participant /
+             preprocess_all → both received report_dirs=None → no figures or QC
+             were ever written when calling through main.py.
+        [B2] build_ica_summary was called and saved manually after preprocess_all,
+             duplicating work that preprocess_all already handles internally when
+             report_dirs is provided (dead code removed).
+    """
+    from src.preprocessing.clean_eeg import preprocess_participant, preprocess_all
+
+    paths   = load_config("configs/paths.yaml")
+    cfg     = load_config("configs/preprocessing.yaml")
     eeg_cfg = cfg["eeg"]
 
     interim_dir   = Path(paths["data"]["interim"]["eeg"])
     processed_dir = Path(paths["data"]["processed"]["eeg"])
-    qc_dir        = Path(paths["reports"]["preprocessing"]["qc"])
-    qc_dir.mkdir(parents=True, exist_ok=True)
+
+    # [FIX B1] Build report_dirs and pass it to every downstream call.
+    # Without this dict the functions receive report_dirs=None and skip all
+    # figure and CSV generation silently — no error, no output.
+    report_dirs = {
+        "figures": paths["reports"]["preprocessing"]["figures"],
+        "qc":      paths["reports"]["preprocessing"]["qc"],
+    }
 
     if participant:
         filepath = next(
@@ -90,19 +101,23 @@ def run_preprocessing_eeg(participant: str | None, save: bool) -> None:
             )
         logger.info(f"EEG preprocessing — single participant: {participant}")
         df_clean, ica_report = preprocess_participant(
-            filepath, cfg=eeg_cfg, output_dir=processed_dir, save=save
+            filepath,
+            cfg=eeg_cfg,
+            output_dir=processed_dir,
+            report_dirs=report_dirs,   # [FIX B1] was not passed
+            save=save,
         )
         logger.info(f"  Components excluded: {ica_report['excluded']}")
     else:
         logger.info("EEG preprocessing — all participants")
-        reports = preprocess_all(interim_dir, processed_dir, cfg=eeg_cfg)
-        summary = build_ica_summary(reports)
-        if save and len(summary) > 0:
-            summary_path = qc_dir / "ica_summary.csv"
-            summary.to_csv(summary_path)
-            logger.info(f"ICA summary → {summary_path}")
-        print("\n=== ICA Quality Control Summary ===")
-        print(summary.to_string())
+        # [FIX B2] preprocess_all writes ica_summary.csv internally when
+        # report_dirs is set — no manual build_ica_summary call needed.
+        preprocess_all(
+            interim_dir,
+            processed_dir,
+            cfg=eeg_cfg,
+            report_dirs=report_dirs,   # [FIX B1] was not passed
+        )
 
 
 def run_preprocessing_tobii(participant: str | None, save: bool) -> None:
@@ -113,16 +128,29 @@ def run_preprocessing_tobii(participant: str | None, save: bool) -> None:
 
     Input  : data/interim/tobii/   (one .parquet per participant)
     Output : data/processed/tobii/ (signals .parquet + fixations .parquet + saccades .parquet)
-    Reports: reports/preprocessing/qc/tobii_qc_summary.csv
+    Reports: reports/preprocessing/figures/ — GSR, pupil, eye tracking plots per participant
+             reports/preprocessing/qc/      — tobii_qc_{pid}.csv + tobii_qc_summary.csv
+
+    Bugs fixed vs original:
+        [B3] cfg=cfg (the full preprocessing config, with top-level keys "eeg",
+             "tobii", "synchronization") was passed to clean_tobii functions.
+             clean_tobii.py expects cfg=cfg["tobii"] (the tobii sub-section, with
+             top-level keys "columns", "gsr", "pupil", ...).
+             reconstruct_timestamps immediately crashes at cfg["columns"] with
+             KeyError: 'columns' because 'columns' only exists under cfg["tobii"].
     """
     from src.preprocessing.clean_tobii import preprocess_participant, preprocess_all
 
-    paths    = load_config("configs/paths.yaml")
-    cfg      = load_config("configs/preprocessing.yaml")
+    paths     = load_config("configs/paths.yaml")
+    cfg       = load_config("configs/preprocessing.yaml")
+    tobii_cfg = cfg["tobii"]   # [FIX B3] isolate tobii sub-section before any call
 
     interim_dir   = Path(paths["data"]["interim"]["tobii"])
     processed_dir = Path(paths["data"]["processed"]["tobii"])
-    report_dirs   = paths["reports"]["preprocessing"]
+    report_dirs   = {
+        "figures": paths["reports"]["preprocessing"]["figures"],
+        "qc":      paths["reports"]["preprocessing"]["qc"],
+    }
 
     if participant:
         filepath = interim_dir / f"{participant}.parquet"
@@ -133,7 +161,7 @@ def run_preprocessing_tobii(participant: str | None, save: bool) -> None:
         logger.info(f"Tobii preprocessing — single participant: {participant}")
         preprocess_participant(
             filepath=filepath,
-            cfg=cfg,
+            cfg=tobii_cfg,      # [FIX B3] was cfg (full config)
             output_dir=processed_dir,
             report_dirs=report_dirs,
             save=save,
@@ -143,25 +171,37 @@ def run_preprocessing_tobii(participant: str | None, save: bool) -> None:
         preprocess_all(
             tobii_interim_dir=interim_dir,
             tobii_processed_dir=processed_dir,
-            cfg=cfg,
+            cfg=tobii_cfg,      # [FIX B3] was cfg (full config)
             report_dirs=report_dirs,
         )
 
 
 def run_synchronization(participant: str | None, save: bool) -> None:
     """
-    Stage 3: EEG ↔ Tobii synchronization + epoch extraction.
+    Stage 3: EEG <-> Tobii synchronization + epoch extraction.
     Offset correction → drift scale → stimulus classification → epoch slicing.
 
-    Input  : data/processed/eeg/   + data/processed/tobii/ + data/interim/tobii/
+    Input  : data/processed/eeg/ + data/processed/tobii/ + data/interim/tobii/
     Output : data/processed/multimodal/ (stimuli + nav_epochs + sync_params per participant)
-    Reports: reports/synchronization/qc/sync_qc_summary.csv
+    Reports: reports/synchronization/figures/ — drift, timeline, epoch figures
+             reports/synchronization/qc/      — sync_qc_summary.csv
+
+    Note: synchronize_participant expects the FULL preprocessing config (not a
+    sub-section) because it internally slices cfg["tobii"], cfg["eeg"], and
+    cfg["synchronization"] itself.
+
+    Bugs fixed vs original:
+        [B4] synchronize_participant was imported twice: once at L160 (module
+             level of the function) and again at L164 inside the if-block.
+        [B5] tobii_proc and tobii_inter paths were passed directly to
+             pd.read_parquet() without an .exists() check — a missing file
+             caused a cryptic pandas ArrowInvalid error instead of a clear message.
     """
+    # [FIX B4] single import only — removed the redundant re-import inside if-block
     from src.preprocessing.synchronize import synchronize_participant, synchronize_all
 
     if participant:
         import pandas as pd
-        from src.preprocessing.synchronize import synchronize_participant
 
         paths = load_config("configs/paths.yaml")
         cfg   = load_config("configs/preprocessing.yaml")
@@ -173,8 +213,23 @@ def run_synchronization(participant: str | None, save: bool) -> None:
         tobii_proc  = Path(paths["data"]["processed"]["tobii"]) / f"{pid}.parquet"
         tobii_inter = Path(paths["data"]["interim"]["tobii"])   / f"{pid}.parquet"
 
+        # [FIX B5] guard all three paths before reading
         if eeg_path is None:
-            raise FileNotFoundError(f"EEG processed file not found for '{pid}'")
+            raise FileNotFoundError(
+                f"EEG processed file not found for '{pid}' "
+                f"in {paths['data']['processed']['eeg']}. "
+                "Run 'python main.py preprocessing_eeg' first."
+            )
+        if not tobii_proc.exists():
+            raise FileNotFoundError(
+                f"Tobii processed file not found: {tobii_proc}\n"
+                "Run 'python main.py preprocessing_tobii' first."
+            )
+        if not tobii_inter.exists():
+            raise FileNotFoundError(
+                f"Tobii interim file not found: {tobii_inter}\n"
+                "Run the ingestion stage first."
+            )
 
         logger.info(f"Synchronization — single participant: {pid}")
         result = synchronize_participant(
@@ -182,7 +237,9 @@ def run_synchronization(participant: str | None, save: bool) -> None:
             pd.read_parquet(eeg_path),
             pd.read_parquet(tobii_proc),
             pd.read_parquet(tobii_inter),
-            cfg, paths, save=save,
+            cfg,    # full config — synchronize_participant slices internally
+            paths,
+            save=save,
         )
         sp = result["sync_params"]
         qc = result["qc"]
@@ -194,6 +251,7 @@ def run_synchronization(participant: str | None, save: bool) -> None:
               f"Ratio: {qc['ratio_mean']:.3f} ± {qc['ratio_std']:.3f}")
     else:
         logger.info("Synchronization — all participants")
+        # synchronize_all loads its own paths/cfg internally
         synchronize_all(save=save)
 
 
@@ -208,9 +266,9 @@ def run_full_preprocessing(participant: str | None, save: bool) -> None:
     If a single participant is specified, runs all three for that participant only.
     """
     stages = [
-        ("EEG preprocessing",   run_preprocessing_eeg),
-        ("Tobii preprocessing",  run_preprocessing_tobii),
-        ("Synchronization",      run_synchronization),
+        ("EEG preprocessing",  run_preprocessing_eeg),
+        ("Tobii preprocessing", run_preprocessing_tobii),
+        ("Synchronization",     run_synchronization),
     ]
 
     total_start = time.time()
@@ -245,7 +303,7 @@ STAGES = {
 }
 
 STAGE_DESCRIPTIONS = {
-    "preprocessing_eeg":   "EEG: CAR → Notch → Bandpass → ICA",
+    "preprocessing_eeg":   "EEG: Notch → Bandpass → CAR → ICA",
     "preprocessing_tobii": "Tobii: timestamps → resample → GSR → pupil → ET",
     "synchronization":     "Sync: offset + drift → epoch extraction",
     "preprocessing":       "Full pipeline: EEG + Tobii + Sync in order",

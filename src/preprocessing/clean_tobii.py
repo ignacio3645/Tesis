@@ -230,11 +230,21 @@ def clean_gsr(
     """
     Clean and decompose the GSR signal into tonic (SCL) and phasic (SCR) components.
 
-    Pipeline:
+    Pipeline (corrected order):
         1. Extract valid GSR samples (~18% density — structural, not data loss)
         2. Detect and flag artifacts (abrupt jumps > mean + n_sigma * std of |diff|)
-        3. Normalize z-score per subject (controls inter-individual baseline differences)
-        4. Decompose into SCL (tonic) and SCR (phasic) via cvxEDA or neurokit2
+        3. Resample artifact-cleaned raw µS signal to uniform 60 Hz grid
+        4. Decompose into SCL/SCR via cvxEDA operating on raw µS
+        5. Z-score normalization applied INDEPENDENTLY to gsr_uniform, SCL and SCR
+
+    Rationale for deferred normalization:
+        cvxEDA's convex solver (ℓ1 regularization, α hyperparameter) is calibrated
+        for signals in microSiemens (µS).  Centering the signal on zero before
+        decomposition introduces negative conductance values, violating the
+        non-negativity constraint on sudomotor impulses (q ≥ 0) and causing the
+        ℓ1 penalty to over- or under-penalize phasic peaks depending on the
+        subject's baseline variance.  Decomposing on raw µS and normalizing each
+        component independently afterward preserves the solver's assumptions.
 
     Parameters
     ----------
@@ -245,10 +255,10 @@ def clean_gsr(
     Returns
     -------
     dict with keys:
-        'gsr_raw'       : pd.Series — raw GSR on uniform grid
-        'gsr_clean'     : pd.Series — artifact-removed GSR (artifacts → NaN)
-        'scl'           : pd.Series — tonic component (Skin Conductance Level)
-        'scr'           : pd.Series — phasic component (Skin Conductance Response)
+        'gsr_raw'       : pd.Series — z-scored GSR on uniform grid (for plots/features)
+        'gsr_clean'     : pd.Series — same as gsr_raw (alias for downstream compatibility)
+        'scl'           : pd.Series — z-scored tonic component (Skin Conductance Level)
+        'scr'           : pd.Series — z-scored phasic component (Skin Conductance Response)
         'artifacts'     : pd.DataFrame — rows flagged as artifacts
         'artifact_thr'  : float — threshold used for artifact detection (µS)
         'n_artifacts'   : int
@@ -300,32 +310,46 @@ def clean_gsr(
         f"Artifacts detected: {n_artifacts}"
     )
 
-    # Replace artifacts with NaN
-    gsr_clean = gsr_raw["gsr_raw"].copy()
-    gsr_clean[artifact_mask] = np.nan
+    # Replace artifacts with NaN — still in µS (no normalization yet)
+    gsr_clean_us = gsr_raw["gsr_raw"].copy()
+    gsr_clean_us[artifact_mask] = np.nan
 
-    # Z-score normalization per subject
-    if gsr_cfg["normalize_per_subject"]:
-        valid_vals = gsr_clean.dropna()
-        if len(valid_vals) > 1:
-            gsr_clean = (gsr_clean - valid_vals.mean()) / valid_vals.std()
-            logger.info("    Z-score normalization applied.")
-
-    # Resample to shared uniform grid
-    gsr_uniform = resample_to_uniform_grid(
-        pd.Series(gsr_clean.values, index=gsr_raw["timestamp"], name="gsr_raw"),
+    # Resample raw µS signal (artifact-cleaned) to shared uniform grid.
+    # cvxEDA receives raw µS — its ℓ1 regularization is calibrated for this domain.
+    gsr_uniform_us = resample_to_uniform_grid(
+        pd.Series(gsr_clean_us.values, index=gsr_raw["timestamp"], name="gsr_raw"),
         gsr_raw["timestamp"],
         uniform_index,
         gap_max_ms,
     )
 
-    # Decompose into SCL / SCR
+    # Decompose into SCL / SCR operating on raw µS
     method = gsr_cfg["decomposition_method"]
-    scl, scr = _decompose_gsr(gsr_uniform, sfreq=cfg["sfreq_target"], method=method)
+    scl_raw, scr_raw = _decompose_gsr(gsr_uniform_us, sfreq=cfg["sfreq_target"], method=method)
+
+    # Z-score normalization per subject — applied INDEPENDENTLY to each component
+    # AFTER cvxEDA so that the solver's non-negativity constraint was not violated.
+    if gsr_cfg["normalize_per_subject"]:
+        def _zscore_series(s: pd.Series, name: str) -> pd.Series:
+            valid = s.dropna()
+            if len(valid) > 1:
+                return ((s - valid.mean()) / valid.std()).rename(name)
+            return s.rename(name)
+
+        gsr_uniform = _zscore_series(gsr_uniform_us, "gsr_raw")
+        scl         = _zscore_series(scl_raw,        "scl")
+        scr         = _zscore_series(scr_raw,        "scr")
+        logger.info(
+            "    Z-score normalization applied independently to GSR, SCL, and SCR."
+        )
+    else:
+        gsr_uniform = gsr_uniform_us.rename("gsr_raw")
+        scl         = scl_raw.rename("scl")
+        scr         = scr_raw.rename("scr")
 
     return {
         "gsr_raw":      gsr_uniform,
-        "gsr_clean":    gsr_uniform,
+        "gsr_clean":    gsr_uniform,   # alias kept for downstream compatibility
         "scl":          scl,
         "scr":          scr,
         "artifacts":    artifacts,
@@ -341,22 +365,26 @@ def _decompose_gsr(
     method: str,
 ) -> tuple[pd.Series, pd.Series]:
     """
-    Decompose normalized GSR into tonic (SCL) and phasic (SCR) components.
+    Decompose a raw µS GSR signal into tonic (SCL) and phasic (SCR) components.
 
-    Important: cvxEDA and neurokit operate only on non-NaN samples. We extract
+    Important: this function now receives the signal in raw microSiemens (µS),
+    NOT z-scored.  Normalization is applied by the caller (clean_gsr) to the
+    decomposed components independently, after this function returns.
+
+    cvxEDA and neurokit operate only on non-NaN samples. We extract
     valid samples, decompose, then reproject back onto the full uniform_index.
     This ensures SCL and SCR always have the same length as gsr_uniform.
 
     Parameters
     ----------
-    gsr_uniform : pd.Series — normalized GSR on uniform time grid (NaN for gaps)
+    gsr_uniform : pd.Series — raw µS GSR on uniform time grid (NaN for gaps)
     sfreq       : float     — sampling frequency of gsr_uniform (Hz)
     method      : str       — "cvxeda" | "neurokit"
 
     Returns
     -------
-    scl : pd.Series — tonic component, same index as gsr_uniform
-    scr : pd.Series — phasic component, same index as gsr_uniform
+    scl : pd.Series — tonic component in raw µS, same index as gsr_uniform
+    scr : pd.Series — phasic component in raw µS, same index as gsr_uniform
     """
     idx = gsr_uniform.index
     n   = len(gsr_uniform)
