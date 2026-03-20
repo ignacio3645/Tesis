@@ -272,10 +272,18 @@ def export_clean_dataframe(
     """
     Convert a cleaned MNE Raw object back to a DataFrame with wall-clock timestamps.
 
+    Unit handling:
+        MNE stores data internally in Volts.  to_data_frame() has a `scalings`
+        parameter that defaults to {'eeg': 1e6}, converting V → µV automatically.
+        We pass scalings={'eeg': 1.0} to keep the data in Volts, then apply a
+        single explicit ×1e6 conversion here.  This avoids the double-conversion
+        bug that would arise from multiplying by 1e6 twice (once inside MNE,
+        once here), which inflates band-power features by (1e6)² = 1e12.
+
     Parameters
     ----------
     raw_clean : mne.io.RawArray
-        ICA-cleaned Raw object. Shape: (n_channels, n_times).
+        ICA-cleaned Raw object. Data stored in Volts. Shape: (n_channels, n_times).
     timestamps : pd.Series
         Original wall-clock timestamps. Shape: (n_times_original,).
     cfg : dict
@@ -285,19 +293,30 @@ def export_clean_dataframe(
     -------
     pd.DataFrame
         Columns: [Fp1, Fp2, ..., P4, timestamp]. Shape: (n_times_clean, 17).
-        EEG values in uV.
+        EEG channel values in µV (typical range ±100 µV).
     """
     ch_names = list(cfg["electrode_map"].values())
 
-    df_clean = raw_clean.to_data_frame()
+    # scalings={'eeg': 1.0} → MNE returns raw Volts, no internal unit conversion
+    df_clean = raw_clean.to_data_frame(scalings={"eeg": 1.0})
 
     start_ts = timestamps.iloc[0]
     df_clean["timestamp"] = start_ts + pd.to_timedelta(df_clean["time"], unit="s")
 
     df_out = df_clean[ch_names + ["timestamp"]].copy()
 
-    # MNE stores data in Volts internally — convert back to uV for feature engineering
+    # Single explicit V → µV conversion
     df_out[ch_names] = df_out[ch_names] * 1e6
+
+    # Sanity check: warn if values are outside the expected physiological range
+    abs_max = df_out[ch_names].abs().max().max()
+    if abs_max > 500:
+        logger.warning(
+            f"  EEG values outside expected range: max={abs_max:.1f} µV. "
+            "Expected ±100 µV after ICA. Check unit conversion upstream."
+        )
+    else:
+        logger.info(f"  EEG amplitude check OK: max={abs_max:.1f} µV")
 
     logger.info(
         f"  Export shape: {df_out.shape} | "
